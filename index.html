@@ -185,6 +185,7 @@ async function unseal(pin,blob){
 let saving=Promise.resolve();
 function save(){
   if(!S||!KEY)return saving;
+  try{const n=netWorth();S.nwHist=S.nwHist||{};S.nwHist[ym(today())]={net:r3(n.net),a:r3(n.assets),l:r3(n.liab),fx:S.settings.fx}}catch(e){}
   const snap=JSON.parse(JSON.stringify(S)), k=KEY, s=SALT;
   saving=saving.then(async()=>{const blob=await seal(k,s,snap);try{localStorage.setItem(VAULT,JSON.stringify(blob))}catch(e){toast('Could not save — storage is full or blocked')}});
   return saving;
@@ -208,14 +209,14 @@ function defaultState(){
       {id:uid(),name:'Car Loan',lender:'',cur:'OMR',open:0,joint:false,partner:'',share:100,openMine:0,openPartner:0,dueDay:0,notes:''}],
     lands:[{id:uid(),name:'Land in India',cur:'INR',total:0,paidOpen:0,dues:[],notes:''}],
     chits:[{id:uid(),name:'Chit Fund',organizer:'',cur:'OMR',value:0,inst:0,months:0,startDate:'',openMonths:0,openPaid:0,prized:false,prizeAmt:0,dueDay:0,notes:''}],
-    funds:[]};
+    funds:[],recurring:[],budgets:{},nwHist:{}};
 }
 function migrate(d){
   const def=defaultState();
   d.settings=Object.assign({},def.settings,d.settings||{});d.settings.last=d.settings.last||{};
   ['accounts','tx','loans','lands','chits','funds'].forEach(k=>{if(!Array.isArray(d[k]))d[k]=[]});
   d.cats=d.cats||def.cats;d.cats.income=d.cats.income||def.cats.income;d.cats.expense=d.cats.expense||def.cats.expense;
-  d.lands.forEach(l=>l.dues=l.dues||[]);
+  d.lands.forEach(l=>l.dues=l.dues||[]);d.recurring=d.recurring||[];d.budgets=d.budgets||{};d.nwHist=d.nwHist||{};
   return d;
 }
 const acc=id=>S.accounts.find(a=>a.id===id);
@@ -236,6 +237,7 @@ function fmt(n,cur,o={}){
 }
 function fdate(d){if(!d)return '';const x=new Date(d+'T00:00:00');const y=x.getFullYear()!==new Date().getFullYear();return x.toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',...(y?{year:'numeric'}:{})})}
 function fdateS(d){if(!d)return '';return new Date(d+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+function fdm(d){return new Date(d+'T00:00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short'})}
 function fmonth(m){return new Date(m+'-01T00:00:00').toLocaleDateString('en-GB',{month:'long',year:'numeric'})}
 function monthDay(day){const t=today();const y=+t.slice(0,4),m=+t.slice(5,7);const last=new Date(y,m,0).getDate();return `${t.slice(0,7)}-${String(Math.min(day,last)).padStart(2,'0')}`}
 function addDays(d,n){const x=new Date(d+'T00:00:00');x.setDate(x.getDate()+n);x.setMinutes(x.getMinutes()-x.getTimezoneOffset());return x.toISOString().slice(0,10)}
@@ -287,15 +289,17 @@ function chitStat(c){
   const rem=Math.max(0,num(c.months)-n);
   return {n,paid:r3(paid),prized,prize,rem,remAmt:rem*num(c.inst),paidThisMonth:S.tx.some(t=>t.type==='chit'&&t.chitId===c.id&&ym(t.date)===ym(today()))};
 }
-function netWorth(){
-  const bal=balances();let assets=0,liab=0;const O=(a,c)=>conv(a,c,'OMR');
-  S.accounts.forEach(a=>{if(!a.archived||bal[a.id])assets+=O(bal[a.id],a.cur)});
-  S.funds.forEach(f=>assets+=O(num(f.value),'INR'));
-  S.chits.forEach(c=>{const s=chitStat(c);if(!s.prized)assets+=O(s.paid,c.cur);else liab+=O(s.remAmt,c.cur)});
-  S.lands.forEach(l=>{const s=landStat(l);assets+=O(num(l.total),l.cur);liab+=O(Math.max(0,s.pending),l.cur)});
-  S.loans.forEach(l=>{liab+=O(Math.max(0,loanStat(l).myOut),l.cur)});
-  return {assets,liab,net:assets-liab};
+function nwItems(){
+  const bal=balances(),A=[],L=[],O=(a,c)=>conv(a,c,'OMR');
+  S.accounts.forEach(a=>{if(!a.archived||bal[a.id])A.push([a.name,bal[a.id],a.cur])});
+  if(S.funds.length)A.push([`SIP — ${S.funds.length} fund${S.funds.length>1?'s':''} (current value)`,S.funds.reduce((x,f)=>x+num(f.value),0),'INR']);
+  S.chits.forEach(c=>{const st=chitStat(c);if(!st.prized){if(st.paid)A.push([`${c.name} — paid in so far`,st.paid,c.cur])}else if(st.remAmt)L.push([`${c.name} — remaining installments`,st.remAmt,c.cur])});
+  S.lands.forEach(l=>{const st=landStat(l);if(num(l.total))A.push([`${l.name} — full price`,num(l.total),l.cur]);if(st.pending>0)L.push([`${l.name} — balance to pay`,st.pending,l.cur])});
+  S.loans.forEach(l=>{const st=loanStat(l);if(st.myOut>0)L.push([`${l.name}${l.joint?` — your ${st.share}% share`:''}${st.rate?' (incl. interest due)':''}`,st.myOut,l.cur])});
+  const tot=x=>x.reduce((t,[,a,c])=>t+O(a,c),0);
+  return {A,L,assets:tot(A),liab:tot(L)};
 }
+function netWorth(){const x=nwItems();return {assets:x.assets,liab:x.liab,net:x.assets-x.liab}}
 function monthSum(m){
   const r={OMR:{inc:0,exp:0,com:0,cats:{},icats:{}},INR:{inc:0,exp:0,com:0,cats:{},icats:{}}};
   S.tx.forEach(t=>{if(ym(t.date)!==m)return;
@@ -323,8 +327,9 @@ function openSheet(html){
   $$('[data-x]',ov).forEach(b=>b.addEventListener('click',()=>closeSheet(ov)));
   return $('.sheet',ov);
 }
-function closeSheet(el){const ov=el.classList.contains('overlay')?el:el.closest('.overlay');if(ov)ov.remove();if(!$('.overlay'))document.body.classList.remove('noscroll')}
-function closeAllSheets(){$$('.overlay').forEach(o=>o.remove());document.body.classList.remove('noscroll')}
+let PENDING_REC=null,NEXT_TOAST=null;
+function closeSheet(el){PENDING_REC=null;const ov=el.classList.contains('overlay')?el:el.closest('.overlay');if(ov)ov.remove();if(!$('.overlay'))document.body.classList.remove('noscroll')}
+function closeAllSheets(){PENDING_REC=null;$$('.overlay').forEach(o=>o.remove());document.body.classList.remove('noscroll')}
 const head=(title,right='')=>`<div class="sh-head"><button class="link" data-x>Close</button><h3>${esc(title)}</h3>${right||'<span style="min-width:60px"></span>'}</div>`;
 
 function optHtml(opts,val){return opts.map(([o,l])=>`<option value="${esc(o)}"${String(o)===String(val??'')?' selected':''}>${esc(l)}</option>`).join('')}
@@ -367,7 +372,7 @@ function formSheet({title,fields,data={},onSave,onDelete,saveLabel='Save',intro=
     if(missing.length){const f=missing[0];toast('Please fill in: '+(typeof f.label==='function'?f.label(all):f.label));return}
     Object.keys(all).forEach(k=>{if(!(k in v)&&fields.find(f=>f.k===k&&f.keep))v[k]=all[k]});
     const res=onSave(v);if(typeof res==='string'){toast(res);return}
-    closeAllSheets();save();render();toast('Saved');
+    closeAllSheets();save();render();toast(NEXT_TOAST||'Saved');NEXT_TOAST=null;
   });
   if(onDelete)$('[data-del]',sh).addEventListener('click',()=>{if(confirm('Delete this? This cannot be undone.')){try{onDelete()}catch(x){return}closeAllSheets();save();render();toast('Deleted')}});
   return sh;
@@ -384,16 +389,16 @@ function payFields(itemCur,label='Paid from',noneLabel='Cash / not from my accou
 }
 function upsertTx(old,obj,lastKey){
   Object.keys(obj).forEach(k=>{if(obj[k]===undefined||obj[k]==='')delete obj[k]});
-  if(old){const i=S.tx.findIndex(t=>t.id===old.id);S.tx[i]={id:old.id,created:old.created,...obj}}
-  else S.tx.push({id:uid(),created:Date.now(),...obj});
+  if(old){const i=S.tx.findIndex(t=>t.id===old.id);S.tx[i]={id:old.id,created:old.created,...(old.recId?{recId:old.recId}:{}),...obj}}
+  else S.tx.push({id:uid(),created:Date.now(),...obj,...(PENDING_REC?{recId:PENDING_REC}:{})});
   if(lastKey&&obj.acc)S.settings.last[lastKey]=obj.acc;
 }
 function delTx(t){S.tx=S.tx.filter(x=>x.id!==t.id);if(t.dueId){S.lands.forEach(l=>(l.dues||[]).forEach(d=>{if(d.id===t.dueId)d.done=false}))}}
 
 /* ============ Transaction forms ============ */
-function incExpForm(type,t){
+function incExpForm(type,t,pre){
   const cats=[...S.cats[type]];if(t&&t.cat&&!cats.includes(t.cat))cats.push(t.cat);
-  formSheet({title:(t?'Edit ':'New ')+(type==='income'?'income':'expense'),data:t||{date:today(),acc:defAcc(type)},
+  formSheet({title:(t?'Edit ':'New ')+(type==='income'?'income':'expense'),data:t||{date:today(),acc:defAcc(type),...(pre||{})},
     fields:[
       {k:'amt',label:v=>`Amount (${curOf(v.acc)})`,type:'number',req:true},
       {k:'cat',label:'Category',type:'select',options:[...cats.map(c=>[c,c]),['__new','+ Add new category…']],def:cats[0]},
@@ -403,12 +408,12 @@ function incExpForm(type,t){
       {k:'note',label:'Note',ph:'Optional'}],
     onSave:v=>{let cat=v.cat;if(cat==='__new'){cat=v.newCat.trim();if(!S.cats[type].includes(cat))S.cats[type].push(cat)}
       if(!v.acc)return 'Add an account first (Settings)';
-      upsertTx(t,{type,date:v.date,acc:v.acc,amt:v.amt,cat,note:v.note.trim()},type)},
+      upsertTx(t,{type,date:v.date,acc:v.acc,amt:v.amt,cat,note:v.note.trim()},type);if(type==='expense')budgetCheck(cat)},
     onDelete:t?()=>delTx(t):null});
 }
-function transferForm(t){
+function transferForm(t,pre){
   const omr=defAcc('transfer','OMR'),inr=(S.accounts.find(a=>a.cur==='INR'&&!a.archived)||{}).id;
-  const data=t?{...t,to:t.toAcc}:{date:today(),acc:omr,to:inr||'family',setFx:true};
+  const data=t?{...t,to:t.toAcc}:{date:today(),acc:omr,to:inr||'family',setFx:true,...(pre||{})};
   formSheet({title:t?'Edit transfer':'Transfer / send money',data,
     intro:t?'':'Sending to your own account moves the balance. Sending to family is recorded as an expense (Family support).',
     fields:[
@@ -423,20 +428,20 @@ function transferForm(t){
     onSave:v=>{
       if(v.acc===v.to)return 'From and To must be different';
       if(v.to==='family'){if(!S.cats.expense.includes('Family support'))S.cats.expense.push('Family support');
-        upsertTx(t,{type:'expense',date:v.date,acc:v.acc,amt:v.amt,cat:'Family support',note:v.note.trim()},'transfer');return}
+        upsertTx(t,{type:'expense',date:v.date,acc:v.acc,amt:v.amt,cat:'Family support',note:v.note.trim()},'transfer');budgetCheck('Family support');return}
       const same=curOf(v.to)===curOf(v.acc);
       upsertTx(t,{type:'transfer',date:v.date,acc:v.acc,amt:v.amt,toAcc:v.to,toAmt:same?v.amt:v.toAmt,note:v.note.trim()},'transfer');
       if(!same&&v.setFx){const o=curOf(v.acc)==='OMR'?v.amt:v.toAmt,i=curOf(v.acc)==='OMR'?v.toAmt:v.amt;S.settings.fx=Math.round(i/o*100)/100}
     },
     onDelete:t?()=>delTx(t):null});
 }
-function loanPayForm(t,loanId){
+function loanPayForm(t,loanId,pre){
   if(!S.loans.length)return toast('Add a loan first in Plans');
   const lid=t?.loanId||loanId||S.loans[0].id;
   const L=v=>loan(v.loanId)||{};
   const isPartner=v=>L(v).joint&&v.payer==='partner';
   const prev=v=>{const l=L(v);if(!l.id||!dailyRate(l)||!v.date)return '';const st=loanLedger(l,{upto:v.date,exclude:t?.id});let h=`Interest due up to ${fdateS(v.date)}: ${fmt(st.acc,l.cur,{force:true})}`;if(v.amt>0&&v.kind==='auto'){const i=Math.min(Math.max(st.acc,0),v.amt);h+=` → ${fmt(i,l.cur,{force:true})} interest + ${fmt(v.amt-i,l.cur,{force:true})} principal`}return h};
-  formSheet({title:t?'Edit loan payment':'Loan payment',data:t||{loanId:lid,date:today(),payer:'me',kind:dailyRate(loan(lid))?'auto':'principal',acc:defAcc('loan_'+lid,loan(lid)?.cur)},
+  formSheet({title:t?'Edit loan payment':'Loan payment',data:t||{loanId:lid,date:today(),payer:'me',kind:dailyRate(loan(lid))?'auto':'principal',acc:defAcc('loan_'+lid,loan(lid)?.cur),...(pre||{})},
     fields:[
       {k:'loanId',label:'Loan',type:'select',options:S.loans.map(l=>[l.id,l.name])},
       {k:'payer',label:'Paid by',type:'select',options:v=>[['me','Me'],['partner',L(v).partner||'Partner']],show:v=>!!L(v).joint},
@@ -478,10 +483,10 @@ function loanAddForm(t,loanId){
     onSave:v=>upsertTx(t,{type:'loanadd',loanId:v.loanId,date:v.date,amt:v.amt,acc:v.acc,accAmt:v.accAmt,note:v.note.trim()}),
     onDelete:t?()=>delTx(t):null});
 }
-function landPayForm(t,landId){
+function landPayForm(t,landId,pre){
   if(!S.lands.length)return toast('Add the land first in Plans');
   const L=v=>land(v.landId)||{};const lid=t?.landId||landId||S.lands[0].id;
-  formSheet({title:t?'Edit land payment':'Land payment',data:t||{landId:lid,date:today(),acc:defAcc('land',land(lid)?.cur)},
+  formSheet({title:t?'Edit land payment':'Land payment',data:t||{landId:lid,date:today(),acc:defAcc('land',land(lid)?.cur),...(pre||{})},
     fields:[
       {k:'landId',label:'Property',type:'select',options:S.lands.map(l=>[l.id,l.name]),keep:true,show:()=>S.lands.length>1},
       {k:'amt',label:v=>`Amount paid (${L(v).cur||''})`,type:'number',req:true},
@@ -494,10 +499,10 @@ function landPayForm(t,landId){
       upsertTx(t,{type:'land',landId:v.landId,date:v.date,amt:v.amt,acc:v.acc,accAmt:v.accAmt,dueId:v.dueId,note:v.note.trim()},'land')},
     onDelete:t?()=>delTx(t):null});
 }
-function chitForm(t,chitId,prize){
+function chitForm(t,chitId,prize,pre){
   if(!S.chits.length)return toast('Add the chit fund first in Plans');
   const type=t?t.type:(prize?'chitprize':'chit');const C=v=>chit(v.chitId)||{};const cid=t?.chitId||chitId||S.chits[0].id;
-  formSheet({title:(t?'Edit ':'')+(type==='chit'?'Chit installment':'Chit prize received'),data:t||{chitId:cid,date:today(),acc:defAcc('chit',chit(cid)?.cur)},
+  formSheet({title:(t?'Edit ':'')+(type==='chit'?'Chit installment':'Chit prize received'),data:t||{chitId:cid,date:today(),acc:defAcc('chit',chit(cid)?.cur),...(pre||{})},
     fields:[
       {k:'chitId',label:'Chit',type:'select',options:S.chits.map(c=>[c.id,c.name]),keep:true,show:()=>S.chits.length>1},
       {k:'amt',label:v=>`${type==='chit'?'Installment paid':'Prize amount received'} (${C(v).cur||''})`,type:'number',req:true,def:v=>type==='chit'?(num(chit(v.chitId)?.inst)||''):'',
@@ -508,8 +513,8 @@ function chitForm(t,chitId,prize){
     onSave:v=>upsertTx(t,{type,chitId:v.chitId,date:v.date,amt:v.amt,acc:v.acc,accAmt:v.accAmt,note:v.note.trim()},'chit'),
     onDelete:t?()=>delTx(t):null});
 }
-function sipForm(t,fundId){
-  formSheet({title:t?'Edit SIP debit':'SIP debit',data:t||{fundId:fundId||'',date:today(),acc:defAcc('sip','INR')},
+function sipForm(t,fundId,pre){
+  formSheet({title:t?'Edit SIP debit':'SIP debit',data:t||{fundId:fundId||'',date:today(),acc:defAcc('sip','INR'),...(pre||{})},
     intro:t?'':'Records the money leaving your bank for SIP. Fund values are updated separately with “Update values”.',
     fields:[
       {k:'fundId',label:'Fund',type:'select',options:[['','All / not specific'],...S.funds.map(f=>[f.id,f.name])]},
@@ -560,16 +565,18 @@ function viewHome(){
     <button class="btn block mt" data-act="setupDone">I'm done setting up</button></div>`;
   const lb=S.settings.lastBackup;const days=lb?Math.floor((Date.now()-new Date(lb+'T00:00:00'))/864e5):null;
   if(S.settings.setupDone&&(days===null||days>14))h+=`<div class="banner warnb row" data-act="backup" style="cursor:pointer"><span>💾 ${days===null?'No backup yet.':`Last backup ${days} days ago.`} Save an encrypted backup to iCloud Drive.</span><b>›</b></div>`;
-  h+=`<div class="card hero"><div class="k small">Net worth</div><div class="big">${fmt(nw.net,'OMR')}</div><div class="muted small">${fmt(conv(nw.net,'OMR','INR'),'INR')} · at 1 OMR = ${fx} INR</div>
+  h+=`<div class="card hero tap" data-act="nwBreakdown"><div class="row"><div class="k small">Net worth</div><div class="k small">Details ›</div></div><div class="big">${fmt(nw.net,'OMR')}</div><div class="muted small">${fmt(conv(nw.net,'OMR','INR'),'INR')} · at 1 OMR = ${fx} INR</div>
     <div class="stats mt"><div class="stat"><div class="k">Assets</div><div class="v">${fmt(nw.assets,'OMR')}</div></div><div class="stat"><div class="k">Liabilities</div><div class="v">${fmt(nw.liab,'OMR')}</div></div></div></div>`;
   [['OMR','Oman'],['INR','India']].forEach(([cur,label])=>{const as=S.accounts.filter(a=>a.cur===cur&&!a.archived);const tot=as.reduce((s,a)=>s+bal[a.id],0);
     h+=`<div class="sec-title"><span>${label} accounts</span><b>${fmt(tot,cur)}</b></div><div class="card list">${as.map(a=>`<div class="item" data-act="openAcc" data-id="${a.id}"><div class="ic">${cur==='OMR'?'🇴🇲':'🇮🇳'}</div><div class="grow t1">${esc(a.name)}</div><div class="amt ${bal[a.id]<0?'neg':''}">${fmt(bal[a.id],cur)}</div></div>`).join('')||'<div class="muted small">No accounts — add one in Settings.</div>'}</div>`});
   if(rem.length)h+=`<div class="sec-title"><span>Coming up</span></div><div class="card list">${rem.slice(0,6).map(r=>`<div class="item" data-act="${r.act}" data-id="${r.id}"><div class="ic">${r.date<today()?'⚠️':'📅'}</div><div class="grow"><div class="t1">${esc(r.text)}</div><div class="t2 ${r.date<today()?'neg':''}">${r.date<today()?'Overdue · ':''}${fdate(r.date)}</div></div></div>`).join('')}</div>`;
+  h+=regularsHtml();
   const row=(k,a,b,cls='')=>`<tr class="${cls}"><td>${k}</td><td>${a}</td><td>${b}</td></tr>`;
   h+=`<div class="sec-title"><span>${fmonth(m)}</span><button class="link small" data-act="report" style="text-transform:none;letter-spacing:0">Full report ›</button></div><div class="card"><table class="mini"><tr><th></th><th>Oman (OMR)</th><th>India (INR)</th></tr>
     ${row('Income',fmt(ms.OMR.inc,'OMR'),fmt(ms.INR.inc,'INR'))}${row('Expenses',fmt(-ms.OMR.exp,'OMR'),fmt(-ms.INR.exp,'INR'))}${row('Loans, land, chit, SIP',fmt(-ms.OMR.com,'OMR'),fmt(-ms.INR.com,'INR'))}
     ${row('Left over',fmt(ms.OMR.inc-ms.OMR.exp-ms.OMR.com,'OMR'),fmt(ms.INR.inc-ms.INR.exp-ms.INR.com,'INR'),'tot')}</table>
     <p class="small muted" style="margin:8px 0 0">Transfers between your own accounts are not counted as expenses.</p></div>`;
+  h+=budgetsHtml()+remitCardHtml();
   const top=['OMR','INR'].flatMap(c=>Object.entries(ms[c].cats).map(([k,v])=>[k,v,c])).sort((a,b)=>conv(b[1],b[2],'OMR')-conv(a[1],a[2],'OMR')).slice(0,5);
   if(top.length){const max=Math.max(...top.map(x=>conv(x[1],x[2],'OMR')));h+=`<div class="sec-title"><span>Top spending this month</span></div><div class="card">${top.map(([k,v,c])=>`<div class="cb"><div class="row small"><span>${emo(k)} ${esc(k)}</span><b>${fmt(v,c)}</b></div><div class="bar"><i style="width:${conv(v,c,'OMR')/max*100}%"></i></div></div>`).join('')}</div>`}
   const com=[];
@@ -654,6 +661,8 @@ function viewSettings(){
   h+=`<div class="sec-title"><span>General</span></div><div class="card list">
     ${item('💱','Exchange rate',`1 OMR = ${S.settings.fx} INR (used for totals)`,'editFx')}
     ${item('🏷️','Categories',`${S.cats.expense.length} expense · ${S.cats.income.length} income`,'cats')}
+    ${item('🔁','Recurring entries',S.recurring.length?`${S.recurring.length} set up`:'Salary, rent, bills, SIP…','recList')}
+    ${item('🎯','Monthly budgets',Object.keys(S.budgets).length?`${Object.keys(S.budgets).length} categories`:'Set spending limits','budgets')}
     ${item('🧭','Getting started guide','Show the setup steps on Home','guide')}</div>`;
   h+=`<div class="sec-title"><span>Security</span></div><div class="card list">
     ${item('⏱️','Auto-lock',S.settings.lockMin==0?'Immediately when you leave the app':`After ${S.settings.lockMin} min away or idle`,'autolock')}
@@ -814,8 +823,166 @@ function reportHtml(m){
   return h;
 }
 function openReport(){
-  const sh=openSheet(head('Monthly report')+`<input type="month" id="repM" class="month-in" value="${ym(today())}"><div id="repBody"></div>`);
-  const draw=()=>{$('#repBody',sh).innerHTML=reportHtml($('#repM',sh).value||ym(today()))};$('#repM',sh).addEventListener('change',draw);draw();
+  let mode='month';
+  const years=[...new Set([today().slice(0,4),...S.tx.map(t=>t.date.slice(0,4))])].sort().reverse();
+  const sh=openSheet(head('Reports')+`<div class="seg"><button data-m="month" class="on">Month</button><button data-m="year">Year</button></div><div id="repCtl"></div><div id="repBody"></div>`);
+  const draw=()=>{$('#repBody',sh).innerHTML=mode==='month'?reportHtml($('#repM',sh).value||ym(today())):yearHtml($('#repY',sh).value)};
+  const ctl=()=>{$('#repCtl',sh).innerHTML=mode==='month'?`<input type="month" id="repM" class="month-in" value="${ym(today())}">`:`<select id="repY" class="month-in">${years.map(y=>`<option>${y}</option>`).join('')}</select>`;draw()};
+  sh.addEventListener('click',e=>{const b=e.target.closest('[data-m]');if(b){mode=b.dataset.m;$$('[data-m]',sh).forEach(x=>x.classList.toggle('on',x===b));ctl()}if(e.target.closest('[data-ycsv]'))yearCSV($('#repY',sh).value)});
+  sh.addEventListener('change',e=>{if(e.target.id==='repM'||e.target.id==='repY')draw()});
+  ctl();
+}
+function yearData(y){
+  const T={OMR:{inc:0,exp:0,com:0,cats:{},icats:{}},INR:{inc:0,exp:0,com:0,cats:{},icats:{}}},months=[];
+  for(let i=1;i<=12;i++){const m=`${y}-${String(i).padStart(2,'0')}`,s=monthSum(m),r=remitStat(d=>ym(d)===m);months.push({m,s,r});
+    ['OMR','INR'].forEach(c=>{T[c].inc+=s[c].inc;T[c].exp+=s[c].exp;T[c].com+=s[c].com;
+      for(const[k,v]of Object.entries(s[c].cats))T[c].cats[k]=(T[c].cats[k]||0)+v;
+      for(const[k,v]of Object.entries(s[c].icats))T[c].icats[k]=(T[c].icats[k]||0)+v})}
+  return {T,months,R:remitStat(d=>d.slice(0,4)===String(y))};
+}
+function yearHtml(y){
+  const nO=v=>fmt(v,'OMR').replace('OMR ','');
+  const {T,months,R}=yearData(y),O=(a,c)=>conv(a,c,'OMR');
+  const inc=T.OMR.inc+O(T.INR.inc,'INR'),exp=T.OMR.exp+O(T.INR.exp,'INR'),saved=inc-exp,rate=inc>0?saved/inc*100:0;
+  const both=(o,i)=>[o?fmt(o,'OMR'):'',i?fmt(i,'INR'):''].filter(Boolean).join(' + ')||fmt(0,'OMR');
+  const srcs=[...new Set([...Object.keys(T.OMR.icats),...Object.keys(T.INR.icats)])].map(k=>[k,T.OMR.icats[k]||0,T.INR.icats[k]||0]).sort((a,b)=>O(b[1],'OMR')+O(b[2],'INR')-O(a[1],'OMR')-O(a[2],'INR'));
+  const cats=[...new Set([...Object.keys(T.OMR.cats),...Object.keys(T.INR.cats)])].map(k=>[k,O(T.OMR.cats[k]||0,'OMR')+O(T.INR.cats[k]||0,'INR'),T.OMR.cats[k]||0,T.INR.cats[k]||0]).sort((a,b)=>b[1]-a[1]);
+  const maxc=Math.max(1,...cats.map(c=>c[1]));
+  const lastM=String(y)===today().slice(0,4)?+today().slice(5,7):12;
+  let h=`<div class="card hero"><div class="k small">${y} · saved</div><div class="big">${fmt(saved,'OMR')}</div><div class="muted small">Savings rate ${rate.toFixed(1)}% of income</div>
+    <div class="stats mt">${statH('Income',fmt(inc,'OMR'))}${statH('Expenses',fmt(exp,'OMR'))}</div></div>
+    <div class="sec-title"><span>Income by source</span></div><div class="card list">${srcs.map(([k,o,i])=>`<div class="item" style="cursor:default"><div class="ic">${emo(k)}</div><div class="grow t1">${esc(k)}</div><div class="amt">${both(o,i)}</div></div>`).join('')||'<div class="muted small">No income recorded.</div>'}</div>
+    <div class="sec-title"><span>Money to India</span></div><div class="card"><div class="stats">${statH('Sent to own accounts',fmt(R.omr,'OMR'))}${statH('Received in India',fmt(R.inr,'INR'))}${statH('Average rate',R.avg?R.avg.toFixed(2):'—')}${statH('Family support',both(R.famO,R.famI))}</div></div>
+    <div class="sec-title"><span>Month by month (OMR)</span></div><div class="card"><table class="mini"><tr><th>Month</th><th>Income</th><th>Expenses</th><th>Saved</th></tr>${months.slice(0,lastM).map(({m,s})=>{const i=s.OMR.inc+O(s.INR.inc,'INR'),e=s.OMR.exp+O(s.INR.exp,'INR');return `<tr><td>${new Date(m+'-01T00:00:00').toLocaleDateString('en-GB',{month:'short'})}</td><td>${nO(i)}</td><td>${nO(e)}</td><td class="${i-e<0?'neg':''}">${nO(i-e)}</td></tr>`}).join('')}<tr class="tot"><td>Total</td><td>${nO(inc)}</td><td>${nO(exp)}</td><td>${nO(saved)}</td></tr></table></div>
+    <div class="sec-title"><span>Expenses by category</span></div><div class="card">${cats.map(([k,v,o,i])=>`<div class="cb"><div class="row small"><span>${emo(k)} ${esc(k)}</span><b>${both(o,i)}</b></div><div class="bar"><i style="width:${v/maxc*100}%"></i></div></div>`).join('')||'<div class="muted small">No expenses recorded.</div>'}</div>
+    <p class="note">India amounts are converted at 1 OMR = ${S.settings.fx} INR. Loan, land, chit and SIP payments are not expenses, so they count as saved (${both(T.OMR.com,T.INR.com)} this year).</p>
+    <button class="btn sec block" data-ycsv>📄 Export ${y} to Excel (CSV)</button>`;
+  return h;
+}
+function yearCSV(y){
+  if(!confirm('The CSV file is NOT encrypted. Anyone who gets the file can read it. Continue?'))return;
+  const {T,months,R}=yearData(y),q=v=>{v=String(v??'');return /[",\n]/.test(v)?`"${v.replace(/"/g,'""')}"`:v},n2=x=>Math.round(x*1000)/1000;
+  const rows=[[`My Money — ${y} summary`],[],['Month','Income OMR','Expenses OMR','Loans/land/chit/SIP OMR','Income INR','Expenses INR','Loans/land/chit/SIP INR','Sent to India OMR','Received INR','Average rate','Family support OMR','Family support INR']];
+  months.forEach(({m,s,r})=>rows.push([m,n2(s.OMR.inc),n2(s.OMR.exp),n2(s.OMR.com),n2(s.INR.inc),n2(s.INR.exp),n2(s.INR.com),n2(r.omr),n2(r.inr),r.avg?r.avg.toFixed(2):'',n2(r.famO),n2(r.famI)]));
+  rows.push(['Total',n2(T.OMR.inc),n2(T.OMR.exp),n2(T.OMR.com),n2(T.INR.inc),n2(T.INR.exp),n2(T.INR.com),n2(R.omr),n2(R.inr),R.avg?R.avg.toFixed(2):'',n2(R.famO),n2(R.famI)]);
+  rows.push([],['Income by source','OMR','INR']);[...new Set([...Object.keys(T.OMR.icats),...Object.keys(T.INR.icats)])].forEach(k=>rows.push([k,n2(T.OMR.icats[k]||0),n2(T.INR.icats[k]||0)]));
+  rows.push([],['Expenses by category','OMR','INR']);[...new Set([...Object.keys(T.OMR.cats),...Object.keys(T.INR.cats)])].forEach(k=>rows.push([k,n2(T.OMR.cats[k]||0),n2(T.INR.cats[k]||0)]));
+  shareFile(`MyMoney-${y}-summary.csv`,'﻿'+rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');
+}
+
+/* ============ Remittances ============ */
+function remitStat(f){
+  const L=S.tx.filter(t=>t.type==='transfer'&&curOf(t.acc)==='OMR'&&curOf(t.toAcc)==='INR'&&f(t.date));
+  let omr=0,inr=0,best=null,worst=null;
+  L.forEach(t=>{omr+=+t.amt;inr+=+t.toAmt;const r=t.toAmt/t.amt;if(!best||r>best.r)best={r,t};if(!worst||r<worst.r)worst={r,t}});
+  let famO=0,famI=0;S.tx.forEach(t=>{if(t.type==='expense'&&t.cat==='Family support'&&f(t.date)){if(curOf(t.acc)==='OMR')famO+=+t.amt;else if(curOf(t.acc)==='INR')famI+=+t.amt}});
+  return {list:L,n:L.length,omr,inr,avg:omr?inr/omr:0,best,worst,famO,famI};
+}
+function remitCardHtml(){
+  const m=ym(today()),M=remitStat(d=>ym(d)===m),Y=remitStat(d=>d.slice(0,4)===m.slice(0,4));
+  if(!Y.n&&!Y.famO&&!Y.famI)return '';
+  return `<div class="sec-title"><span>Sent to India</span><button class="link small" data-act="remit" style="text-transform:none;letter-spacing:0">Details ›</button></div><div class="card tap" data-act="remit"><div class="stats">
+    <div class="stat"><div class="k">This month</div><div class="v">${fmt(M.omr,'OMR')}</div><div class="k">${M.n?`→ ${fmt(M.inr,'INR')} · avg ${M.avg.toFixed(2)}`:'No transfers yet'}</div></div>
+    <div class="stat"><div class="k">This year</div><div class="v">${fmt(Y.omr,'OMR')}</div><div class="k">${Y.n?`→ ${fmt(Y.inr,'INR')} · avg ${Y.avg.toFixed(2)}`:'—'}</div></div></div>
+    ${M.famO||M.famI?`<div class="small muted mt">Family support this month: ${[M.famO?fmt(M.famO,'OMR'):'',M.famI?fmt(M.famI,'INR'):''].filter(Boolean).join(' + ')}</div>`:''}</div>`;
+}
+function openRemit(){
+  const y=today().slice(0,4),Y=remitStat(d=>d.slice(0,4)===y),M=remitStat(d=>ym(d)===ym(today()));
+  openSheet(head('Sent to India')+`<div class="card"><div class="stats">
+    ${statH('This month sent',fmt(M.omr,'OMR'))}${statH('Received',fmt(M.inr,'INR'))}
+    ${statH(`${y} sent`,fmt(Y.omr,'OMR'))}${statH('Received',fmt(Y.inr,'INR'))}
+    ${statH(`Average rate ${y}`,Y.avg?Y.avg.toFixed(2):'—')}${statH('Transfers',Y.n)}
+    ${statH('Best rate',Y.best?`${Y.best.r.toFixed(2)} · ${fdm(Y.best.t.date)}`:'—')}${statH('Lowest rate',Y.worst?`${Y.worst.r.toFixed(2)} · ${fdm(Y.worst.t.date)}`:'—')}</div>
+    <p class="small muted" style="margin:10px 0 0">Counts transfers from your Oman accounts to your own India accounts. Money sent to family is shown separately because it is an expense.</p></div>
+    <div class="card row"><div><div class="t1">Family support ${y}</div><div class="t2">Recorded as expenses</div></div><div class="amt">${[fmt(Y.famO,'OMR'),Y.famI?fmt(Y.famI,'INR'):''].filter(Boolean).join('<br>')}</div></div>
+    ${Y.list.length?`<div class="sec-title"><span>Transfers ${y}</span></div><div class="card list">${[...Y.list].sort(txSort).map(t=>txRow(t).replace('<div class="t2">',`<div class="t2">Rate ${(t.toAmt/t.amt).toFixed(2)} · `)).join('')}</div>`:''}`);
+}
+
+/* ============ Budgets ============ */
+function budgetStat(m=ym(today())){
+  const spent={};S.tx.forEach(t=>{if(t.type==='expense'&&ym(t.date)===m&&num(S.budgets[t.cat]))spent[t.cat]=(spent[t.cat]||0)+conv(+t.amt,curOf(t.acc),'OMR')});
+  return Object.entries(S.budgets).filter(([,a])=>num(a)>0).map(([c,a])=>({cat:c,limit:num(a),spent:spent[c]||0}));
+}
+function budgetCheck(cat){
+  const x=budgetStat().find(b=>b.cat===cat);if(!x)return;const p=x.spent/x.limit;
+  if(p>=1)NEXT_TOAST=`⚠️ ${cat} is over budget: ${fmt(x.spent,'OMR',{force:true})} of ${fmt(x.limit,'OMR',{force:true})}`;
+  else if(p>=0.8)NEXT_TOAST=`${cat}: ${Math.round(p*100)}% of this month's budget used`;
+}
+function budgetsHtml(){
+  const b=budgetStat();if(!b.length)return '';
+  return `<div class="sec-title"><span>Budgets this month</span><button class="link small" data-act="budgets" style="text-transform:none;letter-spacing:0">Edit ›</button></div><div class="card">${b.map(x=>{const p=x.spent/x.limit,col=p>=1?'var(--danger)':p>=0.8?'var(--warn)':'var(--accent)';
+    return `<div class="cb"><div class="row small"><span>${emo(x.cat)} ${esc(x.cat)}</span><b class="${p>=1?'neg':''}">${fmt(x.spent,'OMR')} / ${fmt(x.limit,'OMR')}</b></div><div class="bar"><i style="width:${Math.min(100,p*100)}%;background:${col}"></i></div><div class="t2 mt4 ${p>=1?'neg':p>=0.8?'warn':''}">${p>=1?`Over by ${fmt(x.spent-x.limit,'OMR')}`:`${fmt(x.limit-x.spent,'OMR')} left · ${Math.round(p*100)}% used`}</div></div>`}).join('')}
+    <div class="small muted">India spending is converted at 1 OMR = ${S.settings.fx} INR.</div></div>`;
+}
+function budgetForm(){
+  const data={},fields=S.cats.expense.map((c,i)=>{data['b'+i]=num(S.budgets[c])||'';return {k:'b'+i,label:`${c} — OMR per month`,type:'number',ph:'No limit'}});
+  formSheet({title:'Monthly budgets',data,fields,intro:`Leave blank for no limit. Spending from India accounts is converted at 1 OMR = ${S.settings.fx} INR. You'll get a warning at 80% and when you go over.`,
+    onSave:v=>{const b={};S.cats.expense.forEach((c,i)=>{if(num(v['b'+i])>0)b[c]=num(v['b'+i])});S.budgets=b}});
+}
+
+/* ============ Recurring entries ============ */
+function itemCur(t){switch(t.type){case 'income':case 'expense':case 'transfer':return curOf(t.acc);case 'loanpay':case 'loanadd':case 'loanadj':return loan(t.loanId)?.cur||'';case 'land':return land(t.landId)?.cur||'';case 'chit':case 'chitprize':return chit(t.chitId)?.cur||'';case 'sip':return 'INR'}return ''}
+const recCur=r=>itemCur(r.tpl);
+const recDue=r=>monthDay(num(r.day)||1);
+const recPaid=(r,m=ym(today()))=>S.tx.find(t=>t.recId===r.id&&ym(t.date)===m);
+function newFromTemplate(tp,recId){
+  const p={...tp,date:today()};
+  ({income:()=>incExpForm('income',null,p),expense:()=>incExpForm('expense',null,p),transfer:()=>transferForm(null,{...p,to:p.toAcc}),
+    loanpay:()=>loanPayForm(null,p.loanId,p),land:()=>landPayForm(null,p.landId,p),chit:()=>chitForm(null,p.chitId,false,p),sip:()=>sipForm(null,p.fundId,p)})[tp.type]?.();
+  PENDING_REC=recId||null;
+}
+function recurringForm(r,fromTx){
+  const cur=r?recCur(r):itemCur(fromTx);
+  const base=r?{...r}:{name:txInfo(fromTx).title,day:+fromTx.date.slice(8,10),amt:fromTx.amt,active:true};
+  formSheet({title:r?'Recurring entry':'Repeat every month',data:base,
+    intro:r?'':'This will appear on Home each month with a “Mark paid” button. Tapping it opens the entry already filled in, so you can change the amount or date before saving.',
+    fields:[
+      {k:'name',label:'Name',req:true},
+      {k:'day',label:'Day of the month (1–31)',type:'number',req:true},
+      {k:'amt',label:`Usual amount (${cur})`,type:'number',req:true},
+      {k:'active',label:'Active',type:'toggle',def:true}],
+    onSave:v=>{const day=Math.min(31,Math.max(1,Math.round(v.day)));
+      if(r){Object.assign(r,{name:v.name.trim(),day,amt:v.amt,active:!!v.active});return}
+      const tpl={...fromTx};['id','created','date','dueId','recId','accAmt','note'].forEach(k=>delete tpl[k]);
+      if(tpl.type==='transfer'&&curOf(tpl.acc)!==curOf(tpl.toAcc))delete tpl.toAmt;
+      const rid=uid();S.recurring.push({id:rid,name:v.name.trim(),day,amt:v.amt,active:!!v.active,tpl});const src=S.tx.find(t=>t.id===fromTx.id);if(src&&!S.tx.some(t=>t.recId===rid&&ym(t.date)===ym(src.date)))src.recId=rid;NEXT_TOAST='Added to regular payments on Home'},
+    onDelete:r?()=>{S.recurring=S.recurring.filter(x=>x.id!==r.id)}:null});
+}
+function regularsHtml(){
+  const rs=S.recurring.filter(r=>r.active).sort((a,b)=>num(a.day)-num(b.day));
+  if(!rs.length)return S.settings.setupDone&&S.tx.some(t=>t.type==='income'||t.type==='expense')?`<div class="banner" data-act="recList" style="cursor:pointer">💡 Save time: open your salary or rent in Activity and tap “Repeat every month”.</div>`:'';
+  const m=ym(today()),t0=today();let done=0;
+  const items=rs.map(r=>{const tx=recPaid(r,m);if(tx)done++;const due=recDue(r),over=!tx&&due<t0,i=txInfo({...r.tpl,amt:r.amt});
+    return `<div class="item" ${tx?`data-act="editTx" data-id="${tx.id}"`:`data-act="editRec" data-id="${r.id}"`}><div class="ic">${i.icon}</div><div class="grow"><div class="t1">${esc(r.name)}</div><div class="t2 ${over?'neg':''}">${tx?`Done ${fdate(tx.date)} · ${fmt(tx.amt,itemCur(tx))}`:`${over?'Overdue · ':'Due '}${fdate(due)} · ${fmt(r.amt,recCur(r))}`}</div></div>${tx?'<span class="pos" style="font-size:20px;padding:0 6px">✓</span>':`<button class="btn sm" data-act="recPay" data-id="${r.id}">${r.tpl.type==='income'?'Received':'Mark paid'}</button>`}</div>`}).join('');
+  return `<div class="sec-title"><span>Regular payments</span><b>${done} of ${rs.length} done</b></div><div class="card list">${items}</div>`;
+}
+function openRecList(){
+  openSheet(head('Recurring entries')+`<div class="card list">${S.recurring.length?[...S.recurring].sort((a,b)=>a.day-b.day).map(r=>`<div class="item" data-act="editRec" data-id="${r.id}"><div class="ic">${txInfo({...r.tpl,amt:r.amt}).icon}</div><div class="grow"><div class="t1">${esc(r.name)}${r.active?'':' <span class="t2">(paused)</span>'}</div><div class="t2">Every month on day ${r.day}</div></div><div class="amt">${fmt(r.amt,recCur(r))}</div></div>`).join(''):'<div class="muted small">None yet.</div>'}</div>
+    <p class="note">To add one: open any entry in <b>Activity</b> (for example this month's salary, rent, WiFi, SIP or gold loan payment) and tap <b>“Repeat every month”</b> at the bottom.</p>`);
+}
+
+/* ============ Net worth breakdown & trend ============ */
+const statH=(k,v)=>`<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+function nwChart(){
+  if(S.settings.hideAmounts)return '<div class="muted small">Amounts are hidden.</div>';
+  const cur=ym(today()),all={...(S.nwHist||{}),[cur]:{net:netWorth().net}},ks=Object.keys(all).sort().slice(-12),vals=ks.map(k=>all[k].net);
+  if(ks.length<2){const nx=new Date(cur+'-01T00:00:00');nx.setMonth(nx.getMonth()+1);return `<div class="small muted">Your net worth is saved automatically each month. The chart starts in ${nx.toLocaleDateString('en-GB',{month:'long'})}, once there are two months to compare.</div>`}
+  const mn=Math.min(...vals),mx=Math.max(...vals),rg=(mx-mn)||Math.abs(mx)||1,W=320,H=150,L=20,R=20,T=14,B=24;
+  const X=i=>L+i*(W-L-R)/(ks.length-1),Y=v=>T+(1-(v-mn)/rg)*(H-T-B);
+  const pts=vals.map((v,i)=>`${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const lab=ks.map((k,i)=>(ks.length<=6||i%2===0||i===ks.length-1)?`<text x="${X(i).toFixed(1)}" y="${H-6}" text-anchor="middle" style="font-size:10px;fill:var(--muted)">${new Date(k+'-01T00:00:00').toLocaleDateString('en-GB',{month:'short'})}</text>`:'').join('');
+  const chg=vals[vals.length-1]-vals[0];
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="Net worth trend"><polyline points="${pts}" style="fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round"/>${vals.map((v,i)=>`<circle cx="${X(i).toFixed(1)}" cy="${Y(v).toFixed(1)}" r="3.5" style="fill:var(--accent)"/>`).join('')}${lab}</svg>
+    <div class="small mt">${chg>=0?'<span class="pos">Up</span>':'<span class="neg">Down</span>'} ${fmt(Math.abs(chg),'OMR')} since ${fmonth(ks[0])}</div>`;
+}
+function showNW(){
+  const x=nwItems(),net=x.assets-x.liab,O=(a,c)=>conv(a,c,'OMR');
+  const rows=list=>list.map(([n,a,c])=>`<div class="item" style="cursor:default"><div class="grow"><div class="t1" style="white-space:normal;font-weight:500">${esc(n)}</div>${c!=='OMR'?`<div class="t2">${fmt(a,c)}</div>`:''}</div><div class="amt ${a<0?'neg':''}">${fmt(O(a,c),'OMR')}</div></div>`).join('');
+  openSheet(head('Net worth')+`<div class="card hero"><div class="k small">Net worth</div><div class="big">${fmt(net,'OMR')}</div><div class="muted small">${fmt(conv(net,'OMR','INR'),'INR')} · at 1 OMR = ${S.settings.fx} INR</div></div>
+    <div class="sec-title"><span>Assets</span><b>${fmt(x.assets,'OMR')}</b></div><div class="card list">${rows(x.A)||'<div class="muted small">None</div>'}</div>
+    <div class="sec-title"><span>Liabilities</span><b>${fmt(x.liab,'OMR')}</b></div><div class="card list">${rows(x.L)||'<div class="muted small">None</div>'}</div>
+    <div class="sec-title"><span>Trend</span></div><div class="card">${nwChart()}</div>
+    <p class="note">India amounts are converted at your current rate, so a change in the exchange rate also moves your net worth. Land is counted at its full price, with the unpaid balance as a liability.</p>`);
 }
 
 /* ============ Categories ============ */
@@ -888,7 +1055,11 @@ const ACT={
     const sh=openSheet(head('Add')+`<div class="grid">${tiles.map(([a,e,l])=>`<button class="tile" data-new="${a}"><span class="e">${e}</span>${l}</button>`).join('')}</div>`);
     sh.addEventListener('click',e=>{const b=e.target.closest('[data-new]');if(!b)return;e.stopPropagation();closeSheet(sh);const a=b.dataset.new;
       ({expense:()=>incExpForm('expense'),income:()=>incExpForm('income'),transfer:()=>transferForm(),loanPay:()=>loanPayForm(),landPay:()=>landPayForm(),chitPay:()=>chitForm(),sipPay:()=>sipForm(),loanAdd:()=>loanAddForm(),chitPrize:()=>chitForm(null,null,true),loanAdj:()=>loanAdjForm()})[a]()})},
-  editTx:id=>{const t=S.tx.find(x=>x.id===id);if(t){closeAllSheets();editTx(t)}},
+  editTx:id=>{const t=S.tx.find(x=>x.id===id);if(t){closeAllSheets();editTx(t);const sh=$$('.overlay .sheet').pop();if(sh&&!['loanadj','loanadd','chitprize'].includes(t.type)&&!t.recId)sh.insertAdjacentHTML('beforeend',`<button class="btn sec block mt" data-act="recFrom" data-id="${t.id}">🔁 Repeat every month</button>`)}},
+  recFrom:id=>{const t=S.tx.find(x=>x.id===id);if(t){closeAllSheets();recurringForm(null,t)}},
+  recPay:id=>{const r=S.recurring.find(x=>x.id===id);if(r){closeAllSheets();newFromTemplate({...r.tpl,amt:r.amt},r.id)}},
+  recList:()=>openRecList(),editRec:id=>{closeAllSheets();recurringForm(S.recurring.find(x=>x.id===id))},
+  budgets:()=>budgetForm(),nwBreakdown:()=>showNW(),remit:()=>openRemit(),
   toggleHide:()=>{S.settings.hideAmounts=!S.settings.hideAmounts;save();render()},
   lockNow:()=>lock(),
   report:()=>openReport(),
